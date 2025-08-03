@@ -128,14 +128,55 @@ app.use(passport.session());
 // ROUTES
 // =============================================================================
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    service: 'New Agent Demo Platform API',
-    version: '1.0.0'
-  });
+// Import health service
+const healthService = require('./services/healthService');
+
+// Basic health check endpoint (liveness probe)
+app.get('/health', async (req, res) => {
+  const health = await healthService.quickHealthCheck();
+  const statusCode = health.status === 'healthy' ? 200 : 503;
+  res.status(statusCode).json(health);
+});
+
+// Detailed health check endpoint (readiness probe)
+app.get('/health/detailed', async (req, res) => {
+  const health = await healthService.comprehensiveHealthCheck();
+  const statusCode = health.status === 'healthy' ? 200 : 503;
+  res.status(statusCode).json(health);
+});
+
+// Metrics endpoint for monitoring
+app.get('/metrics', async (req, res) => {
+  const health = await healthService.comprehensiveHealthCheck();
+  
+  // Convert to Prometheus-style metrics format (basic implementation)
+  const metrics = [
+    `# HELP app_health_status Application health status (1=healthy, 0=unhealthy)`,
+    `# TYPE app_health_status gauge`,
+    `app_health_status{service="new-agent-demo"} ${health.status === 'healthy' ? 1 : 0}`,
+    '',
+    `# HELP app_uptime_seconds Application uptime in seconds`,
+    `# TYPE app_uptime_seconds counter`,
+    `app_uptime_seconds{service="new-agent-demo"} ${Math.floor((Date.now() - healthService.startTime) / 1000)}`,
+    ''
+  ];
+
+  // Add individual check metrics
+  for (const [checkName, checkResult] of Object.entries(health.checks)) {
+    metrics.push(`# HELP app_check_${checkName}_status Health check status for ${checkName} (1=healthy, 0=unhealthy)`);
+    metrics.push(`# TYPE app_check_${checkName}_status gauge`);
+    metrics.push(`app_check_${checkName}_status{service="new-agent-demo"} ${checkResult.status === 'healthy' ? 1 : 0}`);
+    
+    if (checkResult.duration !== undefined) {
+      metrics.push(`# HELP app_check_${checkName}_duration_ms Health check duration for ${checkName} in milliseconds`);
+      metrics.push(`# TYPE app_check_${checkName}_duration_ms gauge`);
+      metrics.push(`app_check_${checkName}_duration_ms{service="new-agent-demo"} ${checkResult.duration}`);
+    }
+    metrics.push('');
+  }
+
+  res.set('Content-Type', 'text/plain');
+  res.send(metrics.join('\n'));
 });
 
 // API documentation endpoint
@@ -165,53 +206,14 @@ app.use('/api/demo', require('./routes/demo'));
 // ERROR HANDLING
 // =============================================================================
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Endpoint not found',
-    path: req.path,
-    method: req.method
-  });
-});
+// Import enhanced error handlers
+const { errorHandler, notFoundHandler } = require('./utils/errors');
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('❌ Server Error:', err.stack);
+// 404 handler for non-existent routes
+app.use(notFoundHandler);
 
-  // Handle specific error types
-  if (err.name === 'ValidationError') {
-    return res.status(400).json({
-      success: false,
-      message: 'Validation error',
-      errors: err.errors
-    });
-  }
-
-  if (err.name === 'SequelizeUniqueConstraintError') {
-    return res.status(400).json({
-      success: false,
-      message: 'Duplicate entry',
-      field: err.errors[0]?.path
-    });
-  }
-
-  if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({
-      success: false,
-      message: 'CORS policy violation'
-    });
-  }
-
-  // Default error response
-  res.status(err.status || 500).json({
-    success: false,
-    message: process.env.NODE_ENV === 'production' 
-      ? 'Internal server error' 
-      : err.message,
-    ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
-  });
-});
+// Global error handler with structured error responses
+app.use(errorHandler);
 
 // =============================================================================
 // DATABASE INITIALIZATION AND SERVER STARTUP
